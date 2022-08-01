@@ -122,6 +122,8 @@
 ;; MZ/PE documentation:
 ;; https://wiki.osdev.org/MZ
 ;; https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
+;; https://blog.kowalczyk.info/articles/pefileformat.html
+;; https://cocomelonc.github.io/tutorial/2021/10/31/windows-shellcoding-3.html
 (define (read-pe in)
   (define (raise-invalid) (raise-argument-error 'in "pe-exe?" in))
 
