@@ -1,3 +1,5 @@
 compiled/
 *.bak
+*.rkt#*
+*~
 config.txt

@@ -52,5 +52,3 @@
 ;(displayln
 ; (port->string
 ;  (steamgriddb-grids 5338844 #:api-key api-key)))
-
-(pretty-print (list-shortcuts "C:\\Program Files (x86)\\Steam" 63802008))

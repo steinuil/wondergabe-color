@@ -119,6 +119,19 @@
    number-of-name-entries
    number-of-id-entries))
 
+(define (read-resource-directory-entry in)
+  (read-values in
+    [name-offset         u32]
+    [integer-id          u32]
+    [data-entry-offset   u32]
+    [subdirectory-offset u32])
+
+  (resource-directory-entry
+   name-offset
+   integer-id
+   data-entry-offset
+   (bitwise-and subdirectory-offset #x7fffffff)))
+
 ;; MZ/PE documentation:
 ;; https://wiki.osdev.org/MZ
 ;; https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
@@ -265,31 +278,11 @@
 
   (define name-entries
     (for/list ([idx (in-range (resource-directory-table-number-of-name-entries x))])
-      (read-values in
-        [name-offset         u32]
-        [integer-id          u32]
-        [data-entry-offset   u32]
-        [subdirectory-offset u32])
-
-      (resource-directory-entry
-       name-offset
-       integer-id
-       data-entry-offset
-       (bitwise-and subdirectory-offset #x7fffffff))))
+      (read-resource-directory-entry in)))
 
   (define id-entries
     (for/list ([idx (in-range (resource-directory-table-number-of-id-entries x))])
-      (read-values in
-        [name-offset         u32]
-        [integer-id          u32]
-        [data-entry-offset   u32]
-        [subdirectory-offset u32])
-
-      (resource-directory-entry
-       name-offset
-       integer-id
-       data-entry-offset
-       (bitwise-and subdirectory-offset #x7fffffff))))
+      (read-resource-directory-entry in)))
 
   (displayln (read-resource-directory-table in))
   
