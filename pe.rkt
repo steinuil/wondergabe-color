@@ -1,75 +1,17 @@
 #lang racket
 
-(define (read-anyint-le byte-size)
-  (lambda (in)
-    (for/fold ([n 0])
-              ([shift (build-list byte-size (lambda (x) (* x 8)))])
-      (bitwise-ior n (arithmetic-shift (read-byte in) shift)))))
+(require "read-values.rkt")
 
-(define read-u16-le (read-anyint-le 2))
-(define read-u32-le (read-anyint-le 4))
-(define read-u64-le (read-anyint-le 8))
-
-;(define-syntax read-values-le
-;  (syntax-rules ()
-;    [(read-values-le in [name byte-size] ...)
-;     (begin
-;       (define name ((read-anyint-le byte-size) in))
-;       ...)]))
-
-(define (read-string0 byte-size in)
-  (string-trim (read-string byte-size in) "\0" #:repeat? #t))
-
-(define (read-type type in)
-  (match type
-    ['u8 (read-byte in)]
-    ['u16 (read-u16-le in)]
-    ['u32 (read-u32-le in)]
-    ['u64 (read-u64-le in)]
-    [(list 'bytes n)
-     (read-bytes n in)]
-    [(list 'string n)
-     (read-string n in)]
-    [(list 'string0 n)
-     (read-string0 n in)]
-    [(list 'pad n)
-     (discard-bytes n in)]
-    [(list 'custom fn)
-     (fn in)]))
-
-(define-syntax quote-field-type
-  (syntax-rules ()
-    [(quote-field-type (type qty))
-     (list 'type qty)]
-    [(quote-field-type type)
-     'type]))
-
-(define-syntax (read-value-field stx)
-  (syntax-case stx ()
-    [(read-value-field in name type)
-     (if (equal? (syntax->datum #'name) '_)
-         #'(read-type (quote-field-type type) in)
-         #'(define name (read-type (quote-field-type type) in)))]))
-
-(define-syntax read-values
-  (syntax-rules ()
-    [(read-values in [name type] ...)
-     (begin
-       (read-value-field in name type)
-       ...)]))
-
-(define (discard-bytes n in)
-  (for ([i (make-list n null)])
-    (read-byte in)))
+(struct image-data-directory
+  [virtual-address
+   size]
+  #:transparent)
 
 (define (read-image-data-directory in)
   (read-values in
     [virtual-address u32]
     [size            u32])
   (image-data-directory virtual-address size))
-
-(struct image-data-directory [virtual-address size]
-  #:transparent)
 
 (struct image-section-header
   [name
@@ -89,20 +31,54 @@
    time-date-stamp
    major-version
    minor-version
-   number-of-name-entries
-   number-of-id-entries]
+   name-entries
+   id-entries]
   #:transparent)
 
 (struct resource-directory-entry
-  [name-offset
-   integer-id
-   data-entry-offset
-   subdirectory-offset]
+  [name data-offset child]
   #:transparent)
 
-;; https://docs.microsoft.com/en-us/previous-versions/ms809762(v=msdn.10)#pe-file-resources
-;; https://github.com/erocarrera/pefile/blob/master/pefile.py
-(define (read-resource-directory-table in)
+(define (resource-directory-entry-id entry)
+  (bitwise-and (resource-directory-entry-name entry) #xFFFF))
+
+
+;; The resource directory tree is generally laid out like this:
+;;
+;;   +--- Tree depth
+;;   v
+;; +---+--------------+
+;; | 0 | table #1     |
+;; |   | # of entries | --+ table #1 entries
+;; |   +--------------+   |
+;; |   | entry #1     | <-+
+;; |   | data offset  | --|--+ entry #1 child directory
+;; |   +--------------+   |  |
+;; |   | entry #2     | <-+  |
+;; |   | data offset  | -----|--------------------------+ entry #2 child directory
+;; +---+--------------+      |                          |
+;; | 1 | table #2     | <----+                          |
+;; |   | # of entries | --+ table #2 entries            |
+;; |   +--------------+   |                             |
+;; |   | entry #3     | <-+                             |
+;; |   | offset       | ----+ entry #3 child directory  |
+;; +---+--------------+     |                           |
+;; | 2 | table #3     | <---+                           |
+;; |   | # of entries | --+ table #3 entries            |
+;; |   +--------------+   |                             |
+;; |   | entry #4     | <-+                             |
+;; |   | data offset  |                                 |
+;; +---+--------------+                                 |
+;; | 1 | table #4     | <-------------------------------+
+;; |   | # of entries |
+;; .   .              .
+;;
+;; Which defines this tree:
+;; (table #1 (entry #1 (table #2 (entry #3 (table #3 (entry #4))))
+;;                     (table #4 ...)))
+;;
+;; Generally the first table 
+(define (read-resource-directory-table resource-section-offset in)
   (read-values in
     [characteristics        u32]
     [time-date-stamp        u32]
@@ -111,26 +87,58 @@
     [number-of-name-entries u16]
     [number-of-id-entries   u16])
 
+  (define name-entries-
+    (for/list ([_ (in-range number-of-name-entries)])
+      (read-values in
+        [name         u32]
+        [child-offset u32])
+      (cons name child-offset)))
+
+    (define id-entries-
+      (for/list ([_ (in-range number-of-id-entries)])
+        (read-values in
+          [name         u32]
+          [child-offset u32])
+        (cons name child-offset)))
+
+  (define (resource-directory-entry-has-child? entry)
+    (> (bitwise-and (cdr entry) #x80000000) 0))
+
+  (define (resource-directory-entry-child-offset entry)
+    (bitwise-and (cdr entry) #x7fffffff))
+
+  (define name-entries
+    (for/list ([entry- name-entries-])
+      (if (resource-directory-entry-has-child? entry-)
+          (begin
+            (file-position in (+ resource-section-offset
+                                 (resource-directory-entry-child-offset entry-)))
+            (resource-directory-entry
+             (car entry-)
+             #f
+             (read-resource-directory-table resource-section-offset in)))
+          (resource-directory-entry (car entry-) (cdr entry-) #f))))
+
+  (define id-entries
+    (for/list ([entry- id-entries-])
+      (if (resource-directory-entry-has-child? entry-)
+          (begin
+            (file-position in (+ resource-section-offset
+                                 (resource-directory-entry-child-offset entry-)))
+            (resource-directory-entry
+             (car entry-)
+             #f
+             (read-resource-directory-table resource-section-offset in)))
+          (resource-directory-entry (car entry-) (cdr entry-) #f))))
+
   (resource-directory-table
    characteristics
    time-date-stamp
    major-version
    minor-version
-   number-of-name-entries
-   number-of-id-entries))
+   name-entries
+   id-entries))
 
-(define (read-resource-directory-entry in)
-  (read-values in
-    [name-offset         u32]
-    [integer-id          u32]
-    [data-entry-offset   u32]
-    [subdirectory-offset u32])
-
-  (resource-directory-entry
-   name-offset
-   integer-id
-   data-entry-offset
-   (bitwise-and subdirectory-offset #x7fffffff)))
 
 ;; MZ/PE documentation:
 ;; https://wiki.osdev.org/MZ
@@ -148,7 +156,7 @@
     [pe-header-start u32]) ;; e_lfanew
 
   ;; Skip to PE file header
-  (discard-bytes (- pe-header-start 64) in)
+  (file-position in pe-header-start)
 
   (when (not (equal? (read-bytes 4 in) #"PE\0\0"))
     (raise-invalid))
@@ -165,7 +173,7 @@
 
   ;; Optional header standard fields
   (define image-format
-    (case (read-u16-le in)
+    (case (read-uint 2 in)
       [(#x10b) 'pe32]
       [(#x20b) 'pe32+]
       [else (raise-invalid)]))
@@ -180,16 +188,16 @@
     [base-of-code               u32]
     [base-of-data               (custom (lambda (in)
                                           (case image-format
-                                            [(pe32) (read-u32-le in)]
-                                            [(pe32+) (void)])))])
+                                            [(pe32) (read-uint 4 in)]
+                                            [(pe32+) #f])))])
 
   ;; Optional header Windows-specific fields
-  (define read-size-field
+  (define (read-size-field in)
     (case image-format
-      [(pe32)  read-u32-le]
-      [(pe32+) read-u64-le]))
+      [(pe32)  (read-uint 4 in)]
+      [(pe32+) (read-uint 8 in)]))
 
-  (read-values in
+    (read-values in
     [image-base                     (custom read-size-field)]
     [section-alignment              u32]
     [file-alignment                 u32]
@@ -258,34 +266,21 @@
        number-of-line-numbers
        characteristics)))
 
-  (define here (+ pe-header-start
-                  24 ;; Magic number + COFF file header
-                  size-of-optional-header
-                  (* number-of-sections 40)))
-
   (define resource-section-offset
     (image-section-header-pointer-to-raw-data
      (findf (lambda (h)
               (equal? (image-section-header-name h)
                       ".rsrc"))
             sections)))
-  
-  (discard-bytes (- resource-section-offset here) in)
+  (when (not resource-section-offset)
+    (raise-invalid))
 
-  ;; https://docs.microsoft.com/en-us/previous-versions/ms809762(v=msdn.10)#pe-file-resources
-  (define x
-    (read-resource-directory-table in))
+  (file-position in resource-section-offset)
 
-  (define name-entries
-    (for/list ([idx (in-range (resource-directory-table-number-of-name-entries x))])
-      (read-resource-directory-entry in)))
+  (define resource-directory-tree
+    (read-resource-directory-table resource-section-offset in))
 
-  (define id-entries
-    (for/list ([idx (in-range (resource-directory-table-number-of-id-entries x))])
-      (read-resource-directory-entry in)))
+  (pretty-print resource-directory-tree))
 
-  (displayln (read-resource-directory-table in))
-  
-  (list name-entries id-entries))
-
-(call-with-input-file "C:\\Games\\AM2R\\AM2RLauncher.exe" read-pe)
+(call-with-input-file "C:\\Program Files\\Firefox Developer Edition\\updated\\firefox.exe" read-pe)
+;(call-with-input-file "C:\\Games\\AM2R\\AM2RLauncher.exe" read-pe)
