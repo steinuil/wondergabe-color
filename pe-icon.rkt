@@ -59,6 +59,66 @@
         (read-entries (+ entries-read 1)))))
 
 
+(define (find-icon-data-entries offset in)
+  (read-values in
+    [_                      (pad 12)]
+    [number-of-name-entries u16]
+    [number-of-id-entries   u16])
+
+  (seek-bytes (* 8 number-of-name-entries) in)
+
+  (let find-icons-root ([entries-read 1])
+    (when (> entries-read number-of-id-entries)
+      (raise-argument-error 'in "pe-exe-with-icon?" in))
+
+    (read-values in
+      [name         u32]
+      [child-offset u32])
+
+    (if (entry-is-icon? name)
+        (let ()
+          (file-position in (+ offset (child-offset->directory-offset child-offset)))
+
+          (read-values in
+            [_                      (pad 12)]
+            [number-of-name-entries u16]
+            [number-of-id-entries   u16])
+
+          (seek-bytes (* 8 number-of-name-entries) in)
+
+          (define id-entries
+            (for/list ([i (in-range number-of-id-entries)])
+              (read-values in
+                [name         u32]
+                [child-offset u32])
+
+              (cons name child-offset)))
+
+          (for/list ([entry id-entries])
+            (file-position in (+ offset (child-offset->directory-offset (cdr entry))))
+
+            (read-values in
+              [_ (pad 12)]
+              [number-of-name-entries u16]
+              [number-of-id-entries   u16])
+
+            (seek-bytes (* 8 number-of-name-entries) in)
+
+            (define id-entries
+              (for/list ([i (in-range number-of-id-entries)])
+                (read-values in
+                  [name         u32]
+                  [child-offset u32])
+
+                (cons name child-offset)))
+
+            ;; FIXME
+            id-entries)
+
+          )
+        (find-icons-root (+ entries-read 1)))))
+
+
 (define (extract-icon-from-pe in out)
   (define (raise-invalid) (raise-argument-error 'in "pe-exe?" in))
 
