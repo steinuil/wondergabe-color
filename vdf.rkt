@@ -26,12 +26,11 @@
 (define end-of-map-tag 8)
 
 (define (read-binary-vdf-string in)
-  (define (loop str)
+  (let loop ([str ""])
     (define char (read-char in))
     (if (eq? char #\nul)
         str
-        (loop (string-append str (string char)))))
-  (loop ""))
+        (loop (string-append str (string char))))))
 
 (define (read-binary-vdf-int in)
   (integer-bytes->integer (read-bytes 4) #t))
@@ -40,7 +39,7 @@
   (floating-point-bytes->real (read-bytes 4)))
 
 (define (read-binary-vdf-map in)
-  (define (loop m)
+  (let loop ([m #hash()])
     (define tag (read-byte in))
     (if (= tag end-of-map-tag)
         m
@@ -56,8 +55,7 @@
                        (read-binary-vdf-float in)]
                       [else
                        (raise-argument-error 'in "vdf-tag?" tag)])])
-          (loop (hash-set m name val)))))
-  (loop #hash()))
+          (loop (hash-set m name val))))))
 
 (define (read-binary-vdf [in (current-input-port)])
   (read-binary-vdf-map in))
@@ -103,7 +101,7 @@
            rackcheck
            racket/port
            racket/flonum)
-
+  
   (define gen:string-without-null
     (gen:string
      (gen:filter gen:char (lambda (c) (not (eq? c #\nul))))))
